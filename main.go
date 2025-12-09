@@ -5,6 +5,8 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"strings"
+	"sync"
 )
 
 const (
@@ -13,9 +15,19 @@ const (
 	TYPE = "tcp"
 )
 
+type Server struct {
+	clients map[net.Conn]string
+	mu      sync.Mutex
+}
+
 func main() {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
 	slog.SetDefault(logger)
+
+	server := &Server{
+		clients: make(map[net.Conn]string),
+	}
+
 	address := fmt.Sprintf("%s:%s", HOST, PORT)
 	listener, err := net.Listen(TYPE, address)
 	if err != nil {
@@ -32,26 +44,64 @@ func main() {
 			slog.Error("Failed to accept connection", "error", err)
 			continue
 		}
-		go handleConnection(conn)
+		go server.handleConnection(conn)
 	}
 }
 
-func handleConnection(conn net.Conn) {
+func (s *Server) handleConnection(conn net.Conn) {
 	defer conn.Close()
-	slog.Info("New Client Connected", "addr", conn.RemoteAddr().String())
+
+	conn.Write([]byte("Enter your name:\n"))
 
 	buffer := make([]byte, 1024)
+
+	n, err := conn.Read(buffer)
+	if err != nil {
+		return
+	}
+
+	name := strings.TrimSpace(string(buffer[:n]))
+
+	s.mu.Lock()
+	s.clients[conn] = name
+	s.mu.Unlock()
+
+	slog.Info("Client joined", "name", name, "addr", conn.RemoteAddr().String())
+	s.broadcastMessage(fmt.Sprintf("--- %s joined the chat ---\n", name), conn)
 
 	for {
 		n, err := conn.Read(buffer)
 		if err != nil {
-			slog.Info("Client Disconnected", "addr", conn.RemoteAddr().String())
+			s.removeClient(conn)
 			return
 		}
 
-		receivedData := string(buffer[:n])
-		fmt.Printf("Received: %s\n", receivedData)
-
-		conn.Write([]byte("Server says: " + receivedData))
+		msg := strings.TrimSpace(string(buffer[:n]))
+		if msg == "" {
+			continue
+		}
+		fullMessage := fmt.Sprintf("[%s]: %s\n", name, msg)
+		s.broadcastMessage(fullMessage, conn)
 	}
+}
+
+func (s *Server) broadcastMessage(message string, sender net.Conn) {
+	s.mu.Lock()
+	defer s.mu.Unlock() // Ensure unlock happens when function exits
+
+	for conn, _ := range s.clients {
+		if conn != sender {
+			conn.Write([]byte(message))
+		}
+	}
+}
+
+func (s *Server) removeClient(conn net.Conn) {
+	s.mu.Lock()
+	name := s.clients[conn]
+	delete(s.clients, conn)
+	s.mu.Unlock()
+
+	slog.Info("Client Disconnected", "name", name)
+	s.broadcastMessage(fmt.Sprintf("--- %s left the chat ---\n", name), nil)
 }
