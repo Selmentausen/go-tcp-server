@@ -15,8 +15,15 @@ const (
 	TYPE = "tcp"
 )
 
+type Player struct {
+	Name  string
+	X     int
+	Y     int
+	Color string
+}
+
 type Server struct {
-	clients map[net.Conn]string
+	clients map[net.Conn]*Player
 	mu      sync.Mutex
 }
 
@@ -25,7 +32,7 @@ func main() {
 	slog.SetDefault(logger)
 
 	server := &Server{
-		clients: make(map[net.Conn]string),
+		clients: make(map[net.Conn]*Player),
 	}
 
 	address := fmt.Sprintf("%s:%s", HOST, PORT)
@@ -60,14 +67,18 @@ func (s *Server) handleConnection(conn net.Conn) {
 		return
 	}
 
-	name := strings.TrimSpace(string(buffer[:n]))
+	player := &Player{
+		Name: strings.TrimSpace(string(buffer[:n])),
+		X:    0,
+		Y:    0,
+	}
 
 	s.mu.Lock()
-	s.clients[conn] = name
+	s.clients[conn] = player
 	s.mu.Unlock()
 
-	slog.Info("Client joined", "name", name, "addr", conn.RemoteAddr().String())
-	s.broadcastMessage(fmt.Sprintf("--- %s joined the chat ---\n", name), conn)
+	slog.Info("Player joined", "name", player.Name)
+	s.broadcastMessage(fmt.Sprintf("--- %s joined at (0, 0) ---\n", player.Name), conn)
 
 	for {
 		n, err := conn.Read(buffer)
@@ -80,8 +91,13 @@ func (s *Server) handleConnection(conn net.Conn) {
 		if msg == "" {
 			continue
 		}
-		fullMessage := fmt.Sprintf("[%s]: %s\n", name, msg)
-		s.broadcastMessage(fullMessage, conn)
+
+		if strings.HasPrefix(msg, "/") {
+			s.handleCommand(conn, msg, player)
+		} else {
+			fullMessage := fmt.Sprintf("[%s]: %s\n", player.Name, msg)
+			s.broadcastMessage(fullMessage, conn)
+		}
 	}
 }
 
@@ -98,10 +114,27 @@ func (s *Server) broadcastMessage(message string, sender net.Conn) {
 
 func (s *Server) removeClient(conn net.Conn) {
 	s.mu.Lock()
-	name := s.clients[conn]
+	player := s.clients[conn]
 	delete(s.clients, conn)
 	s.mu.Unlock()
 
-	slog.Info("Client Disconnected", "name", name)
-	s.broadcastMessage(fmt.Sprintf("--- %s left the chat ---\n", name), nil)
+	slog.Info("player Disconnected", "name", player.Name)
+	s.broadcastMessage(fmt.Sprintf("--- %s left the chat ---\n", player.Name), nil)
+}
+
+func (s *Server) handleCommand(sender net.Conn, command string, player *Player) {
+	switch command {
+	case "/w":
+		player.Y++
+	case "/s":
+		player.Y--
+	case "/a":
+		player.X++
+	case "/d":
+		player.X--
+	default:
+		sender.Write([]byte("Unknown command. Use /w /a /s /d to move.\n"))
+		return
+	}
+	sender.Write([]byte(fmt.Sprintf("You moved to (%d,%d)\n", player.X, player.Y)))
 }
