@@ -31,10 +31,11 @@ const (
 )
 
 type Player struct {
-	Name  string
-	X     int
-	Y     int
-	Color string
+	Name    string
+	X       int
+	Y       int
+	Color   string
+	MsgChan chan string
 }
 
 type Server struct {
@@ -88,11 +89,18 @@ func (s *Server) handleConnection(conn net.Conn) {
 	colorIdx := len(s.clients) % len(COLORS)
 	s.mu.Unlock()
 	player := &Player{
-		Name:  strings.TrimSpace(string(buffer[:n])),
-		X:     x,
-		Y:     y,
-		Color: COLORS[colorIdx],
+		Name:    strings.TrimSpace(string(buffer[:n])),
+		X:       x,
+		Y:       y,
+		Color:   COLORS[colorIdx],
+		MsgChan: make(chan string, 10),
 	}
+
+	go func() {
+		for msg := range player.MsgChan {
+			conn.Write([]byte(msg))
+		}
+	}()
 
 	s.mu.Lock()
 	s.clients[conn] = player
@@ -118,7 +126,7 @@ func (s *Server) handleConnection(conn net.Conn) {
 		if strings.HasPrefix(msg, "/") {
 			s.handleCommand(conn, msg, player)
 		} else {
-			fullMessage := fmt.Sprintf("[%s]: %s\n", player.Name, msg)
+			fullMessage := fmt.Sprintf("%s: %s\n", player.Name, msg)
 			s.broadcastMessage(fullMessage, player, CHAT_RADIUS)
 		}
 	}
@@ -128,9 +136,12 @@ func (s *Server) broadcastMessage(message string, sender *Player, radius int) {
 	s.mu.Lock()
 	defer s.mu.Unlock() // Ensure unlock happens when function exits
 
-	for conn, p := range s.clients {
+	for _, p := range s.clients {
 		if p == sender || isNearby(sender, p, radius) {
-			conn.Write([]byte(fmt.Sprintf("MSG:%s%s", sender.Name, message)))
+			select {
+			case p.MsgChan <- "MSG:" + message:
+			default:
+			}
 		}
 	}
 }
@@ -142,6 +153,7 @@ func (s *Server) removeClient(conn net.Conn) {
 	s.mu.Unlock()
 
 	if player != nil {
+		close(player.MsgChan)
 		slog.Info("player Disconnected", "name", player.Name)
 		s.broadcastMessage(fmt.Sprintf("--- %s left the chat ---\n", player.Name), nil, 0)
 		go s.broadcastGameView()
@@ -209,8 +221,11 @@ func (s *Server) broadcastGameView() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	for conn, _ := range s.clients {
-		conn.Write([]byte("MAP:" + view))
+	for _, p := range s.clients {
+		select {
+		case p.MsgChan <- "MAP:" + view:
+		default:
+		}
 	}
 }
 
