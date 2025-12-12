@@ -73,7 +73,7 @@ func main() {
 func (s *Server) handleConnection(conn net.Conn) {
 	defer conn.Close()
 
-	conn.Write([]byte("Enter your name:\n"))
+	conn.Write([]byte("MSG:Enter your name:\n"))
 
 	buffer := make([]byte, 1024)
 
@@ -99,10 +99,10 @@ func (s *Server) handleConnection(conn net.Conn) {
 	s.mu.Unlock()
 
 	slog.Info("Player joined", "name", player.Name)
+	s.broadcastGameView()
 	s.broadcastMessage(fmt.Sprintf("--- %s joined at (%d, %d) ---\n", player.Name, x, y), player, 0)
 
-	conn.Write([]byte(s.renderView()))
-
+	conn.Write([]byte("MAP:" + s.renderView()))
 	for {
 		n, err := conn.Read(buffer)
 		if err != nil {
@@ -129,10 +129,8 @@ func (s *Server) broadcastMessage(message string, sender *Player, radius int) {
 	defer s.mu.Unlock() // Ensure unlock happens when function exits
 
 	for conn, p := range s.clients {
-		if p != sender {
-			if sender == nil || isNearby(sender, p, radius) {
-				conn.Write([]byte(message))
-			}
+		if p == sender || isNearby(sender, p, radius) {
+			conn.Write([]byte(fmt.Sprintf("MSG:%s%s", sender.Name, message)))
 		}
 	}
 }
@@ -143,25 +141,36 @@ func (s *Server) removeClient(conn net.Conn) {
 	delete(s.clients, conn)
 	s.mu.Unlock()
 
-	slog.Info("player Disconnected", "name", player.Name)
-	s.broadcastMessage(fmt.Sprintf("--- %s left the chat ---\n", player.Name), nil, 0)
+	if player != nil {
+		slog.Info("player Disconnected", "name", player.Name)
+		s.broadcastMessage(fmt.Sprintf("--- %s left the chat ---\n", player.Name), nil, 0)
+		go s.broadcastGameView()
+	}
 }
 
 func (s *Server) handleCommand(sender net.Conn, command string, player *Player) {
 	switch command {
 	case "/w":
-		player.Y++
+		if player.Y < MAP_HEIGHT {
+			player.Y++
+		}
 	case "/s":
-		player.Y--
+		if player.Y > 0 {
+			player.Y--
+		}
 	case "/d":
-		player.X++
+		if player.X < MAP_WIDTH {
+			player.X++
+		}
 	case "/a":
-		player.X--
+		if player.X > 0 {
+			player.X--
+		}
 	default:
-		sender.Write([]byte("Unknown command. Use /w /a /s /d to move.\n"))
+		sender.Write([]byte("MSG:Unknown command. Use /w /a /s /d to move.\n"))
 		return
 	}
-	sender.Write([]byte(fmt.Sprintf("You moved to (%d,%d)\n", player.X, player.Y)))
+	sender.Write([]byte(fmt.Sprintf("MSG:You moved to (%d,%d)\n", player.X, player.Y)))
 	s.broadcastGameView()
 }
 
@@ -170,9 +179,6 @@ func (s *Server) renderView() string {
 	defer s.mu.Unlock()
 
 	var sb strings.Builder
-
-	sb.WriteString("\033[H\033[2J")
-	sb.WriteString("=== GOPHER ARENA ===\n")
 
 	for y := MAP_HEIGHT; y >= 0; y-- {
 		for x := 0; x < MAP_WIDTH; x++ {
@@ -195,18 +201,16 @@ func (s *Server) renderView() string {
 		}
 		sb.WriteString("\n")
 	}
-	sb.WriteString("\nUse /w /a /s /d to move. Chat to talk.\n")
 	return sb.String()
 }
 
 func (s *Server) broadcastGameView() {
 	view := s.renderView()
-
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	for conn, _ := range s.clients {
-		conn.Write([]byte(view))
+		conn.Write([]byte("MAP:" + view))
 	}
 }
 
